@@ -5,7 +5,7 @@ from discord.ext import commands
 class MessageCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.ROL_PERMITIDO_ID = 1391931720730808382  # Mismo ID de rol que en otros comandos
+        self.ROL_PERMITIDO_ID = 1321555751805653012  # Mismo ID de rol que en otros comandos
 
     def tiene_permiso(self, miembro):
         return miembro and any(rol.id == self.ROL_PERMITIDO_ID for rol in miembro.roles)
