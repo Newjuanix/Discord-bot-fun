@@ -11,11 +11,11 @@ from events.on_message import tickets_con_staff  # para no responder si ya llama
 from utils.verification import iniciar_verificacion, manejar_respuesta_verificacion
 from utils.ia_chat import obtener_respuesta_llama
 from config import (
-    CANAL_PERMITIDO,
-    CANAL_VERIFICACION,
     CATEGORIA_TICKETS,
+    CANAL_VERIFICACION,
     ROL_VERIFICADO
 )
+import time
 
 # Configurar intents
 intents = discord.Intents.default()
@@ -24,17 +24,18 @@ intents.messages = True
 intents.guilds = True
 
 # Estados compartidos de verificación:
-# {user_id: {"canal_ticket_id": int, "paso_actual": int, "datos": {}}}
 estados_verificacion = {}
+
+# Cooldown por usuario (para menciones)
+cooldown_menciones = {}  # {user_id: timestamp_ultimo_mensaje}
 
 # Bot
 bot = commands.Bot(command_prefix='?', intents=intents, help_command=None)
 
 # Estado por canal de ticket
-# {channel_id: {"historial_chat": [], "instrucciones_enviadas": False}}
 canales_ticket = {}
 
-# Mantener vivo (Replit, etc.)
+# Mantener vivo
 keep_alive()
 
 # Carga de extensiones
@@ -62,6 +63,11 @@ async def setup_hook():
 async def on_ready():
     print(f'✅ {bot.user.name} se ha conectado a Discord.')
     enviar_curiosidad.start()
+    activity = discord.Activity(
+        type=discord.ActivityType.watching,  # watching = "Viendo ..."
+        name="Mi creador: juanix.is-a.dev"       # texto que aparece
+    )
+    await bot.change_presence(activity=activity)
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -73,46 +79,23 @@ async def on_message(message: discord.Message):
     if message.channel.id in tickets_con_staff:
         return
 
-    # Comandos con prefijo restringidos a CANAL_PERMITIDO
+    # Comandos con prefijo
     if message.content.startswith(bot.command_prefix):
-        if CANAL_PERMITIDO and message.channel.id != CANAL_PERMITIDO:
-            canal_permitido = message.guild.get_channel(CANAL_PERMITIDO) if message.guild else None
-            if canal_permitido:
-                await message.reply(
-                    f"❌ Los comandos solo están permitidos en {canal_permitido.mention}",
-                    delete_after=10
-                )
-            else:
-                await message.reply("❌ Este comando solo está permitido en el canal designado.", delete_after=10)
-            try:
-                await message.delete()
-            except:
-                pass
-            return
         await bot.process_commands(message)
         return
 
-    # ¿Es un canal de tickets?
+    # ----------------------------
+    #   BLOQUE: SOLO TICKETS
+    # ----------------------------
     is_ticket = hasattr(message.channel, 'category') and message.channel.category_id == CATEGORIA_TICKETS
     mensaje_lower = message.content.lower().strip()
 
-    # Si NO es ticket y piden verificar -> avisar y salir
-    if not is_ticket and mensaje_lower in ('verificar', 'me quiero verificar'):
-        await message.channel.send("🛠️ La verificación solo se realiza en un **ticket**. Abre un ticket y escribe **verificar** ahí.")
-        return
-
-    # -----------------------
-    #   BLOQUE: SOLO TICKETS
-    # -----------------------
     if is_ticket:
-        # 1) Asegurar el estado del canal ANTES de cualquier return
+        # Mantener estado del canal
         if message.channel.id not in canales_ticket:
-            canales_ticket[message.channel.id] = {
-                "historial_chat": [],
-                "instrucciones_enviadas": False
-            }
+            canales_ticket[message.channel.id] = {"historial_chat": [], "instrucciones_enviadas": False}
 
-        # 2) Instrucciones una sola vez
+        # Instrucciones una sola vez
         if not canales_ticket[message.channel.id]["instrucciones_enviadas"]:
             msg_instr = (
                 "¡Hola! Soy el asistente de soporte.\n\n"
@@ -123,7 +106,7 @@ async def on_message(message: discord.Message):
             await message.channel.send(msg_instr)
             canales_ticket[message.channel.id]["instrucciones_enviadas"] = True
 
-        # 3) Parar chat -> resumen para staff
+        # Parar chat
         if mensaje_lower == 'parar chat':
             historial = canales_ticket.get(message.channel.id, {}).get("historial_chat", [])
             if historial:
@@ -153,7 +136,7 @@ async def on_message(message: discord.Message):
                 await message.channel.send("No hay historial de conversación para enviar al staff.")
                 return
 
-        # 4) Iniciar verificación SOLO en ticket
+        # Verificación
         if mensaje_lower in ('verificar', 'me quiero verificar'):
             try:
                 await iniciar_verificacion(bot, message, estados_verificacion)
@@ -162,12 +145,11 @@ async def on_message(message: discord.Message):
                 await message.channel.send("❌ Ocurrió un error al iniciar la verificación. Por favor, inténtalo de nuevo.")
             return
 
-        # 5) Continuar verificación si corresponde
+        # Continuar verificación
         user_id = message.author.id
         if user_id in estados_verificacion:
             estado = estados_verificacion[user_id]
             canal_esperado = estado.get("canal_ticket_id")
-
             if canal_esperado == message.channel.id:
                 try:
                     manejado = await manejar_respuesta_verificacion(bot, message, estados_verificacion)
@@ -180,18 +162,15 @@ async def on_message(message: discord.Message):
                 await message.channel.send("⚠️ Continúa tu verificación en el canal de tu ticket.")
                 return
 
-        # 6) Delegar al manejador de soporte (llamar staff, etc.)
+        # Delegar soporte
         handled = await handle_on_message(bot, message)
         if handled:
             return
 
-        # 7) Fallback de IA en tickets
-        canales_ticket[message.channel.id]["historial_chat"].append(
-            {"role": "user", "content": message.content}
-        )
+        # Fallback IA en tickets
+        canales_ticket[message.channel.id]["historial_chat"].append({"role": "user", "content": message.content})
         if len(canales_ticket[message.channel.id]["historial_chat"]) > 20:
-            canales_ticket[message.channel.id]["historial_chat"] = \
-                canales_ticket[message.channel.id]["historial_chat"][-20:]
+            canales_ticket[message.channel.id]["historial_chat"] = canales_ticket[message.channel.id]["historial_chat"][-20:]
 
         contexto = [
             {"role": "system",
@@ -200,29 +179,25 @@ async def on_message(message: discord.Message):
         contexto.extend(canales_ticket[message.channel.id]["historial_chat"])
 
         respuesta = await obtener_respuesta_llama(contexto)
-        canales_ticket[message.channel.id]["historial_chat"].append(
-            {"role": "assistant", "content": respuesta}
-        )
+        canales_ticket[message.channel.id]["historial_chat"].append({"role": "assistant", "content": respuesta})
         await message.channel.send(respuesta)
         return
 
     # ----------------------------
-    #   Fuera de tickets (default)
+    #   Fuera de tickets
     # ----------------------------
-    if CANAL_PERMITIDO and message.channel.id != CANAL_PERMITIDO:
-        try:
-            if hasattr(bot, 'user') and bot.user in message.mentions:
-                canal_permitido = message.guild.get_channel(CANAL_PERMITIDO) if message.guild else None
-                if canal_permitido:
-                    await message.reply(f"Master me censura. Solo puedo responder en {canal_permitido.mention} 😔")
-                    try:
-                        await message.delete()
-                    except:
-                        pass
-                return
-        except Exception as e:
-            print(f"❌ Error al manejar mención: {e}")
+    ahora = time.time()
+    user_id = message.author.id
 
+    # Menciones fuera de tickets con cooldown 3s
+    if bot.user in message.mentions:
+        if user_id in cooldown_menciones and ahora - cooldown_menciones[user_id] < 3:
+            return
+        cooldown_menciones[user_id] = ahora
+        await handle_on_message(bot, message)
+        return
+
+    # Default
     await handle_on_message(bot, message)
 
 
