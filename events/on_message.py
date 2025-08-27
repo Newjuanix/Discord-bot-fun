@@ -2,6 +2,7 @@
 
 import random
 import discord
+import time
 from utils.ia_chat import obtener_respuesta_llama
 from utils.shared_data import usuarios_chat
 from config import (
@@ -15,6 +16,9 @@ from config import (
 
 # Tickets donde el staff fue llamado (desactivar auto-chat)
 tickets_con_staff = set()
+
+# Cooldown por usuario para menciones
+cooldown_menciones = {}  # {user_id: timestamp_ultimo_mensaje}
 
 async def handle_staff_call(message: discord.Message):
     tickets_con_staff.add(message.channel.id)
@@ -56,23 +60,38 @@ async def handle_staff_call(message: discord.Message):
     return True
 
 
+# Cooldown global de 4 segundos entre respuestas
+last_message_time = 0
+
 async def on_message(bot, message: discord.Message):
-    # Ignorar bots (salvo mención explícita al bot)
+    global last_message_time
+
+    # Ignorar bots salvo mención explícita
     if message.author.bot and bot.user not in message.mentions:
         return False
 
-    # Si el canal ya tiene staff llamado, no responder más
+    # Cooldown general 4s
+    now = time.time()
+    if now - last_message_time < 4:
+        return False
+    last_message_time = now
+
+    # No responder si el canal ya llamó staff
     if message.channel.id in tickets_con_staff:
         return True
 
-    # ¿Ticket?
-    is_ticket_channel = hasattr(message.channel, 'category') and message.channel.category_id == CATEGORIA_TICKETS
-
-    contenido = message.content.lower()
+    contenido = message.content.lower().strip()
     canal_id = message.channel.id
     autor_id = message.author.id
 
-    # --- RESPUESTA ALEATORIA 5% EN TODOS LOS CANALES ---
+    # Detectar tickets
+    is_ticket_channel = hasattr(message.channel, 'category') and message.channel.category_id == CATEGORIA_TICKETS
+
+    # Manejar 'llamar staff' solo en tickets
+    if is_ticket_channel and contenido == "llamar staff":
+        return await handle_staff_call(message)
+
+    # Respuesta aleatoria 5% en cualquier canal
     if random.random() < 0.05:
         try:
             prompt = f"Responde con sarcasmo y estilo humano este mensaje: \"{message.content}\". Que sea corto, divertido, nada de mensajes de ayuda, claro y en español."
@@ -81,26 +100,12 @@ async def on_message(bot, message: discord.Message):
             return True
         except Exception as e:
             print(f"Error en respuesta aleatoria: {e}")
-            # Continuar para seguir con resto del código si falla
 
-    # Si hay canal permitido y no es ese ni un ticket, no manejamos el resto
-    if CANAL_PERMITIDO and canal_id != CANAL_PERMITIDO and not is_ticket_channel:
-        return False
-
-    # Si están iniciando verificación en ticket, lo maneja bot.py
-    if is_ticket_channel and contenido.strip() in ("verificar", "me quiero verificar"):
-        return False
-
-    # Manejar "llamar staff" en tickets
-    if is_ticket_channel and contenido == "llamar staff":
-        print(f"DEBUG: Comando 'llamar staff' detectado en el canal {canal_id}")
-        return await handle_staff_call(message)
-
-    # Comandos con prefijo: los maneja bot.py
+    # Comandos con prefijo los maneja bot.py
     if contenido.startswith(PREFIX):
         return False
 
-    # Mención directa al bot
+    # Mención directa al bot en cualquier canal
     if bot.user in message.mentions:
         if any(p in contenido for p in PALABRAS_PROHIBIDAS):
             await message.channel.send("❌ Lo siento, no puedo compartir información confidencial.")
@@ -114,7 +119,7 @@ async def on_message(bot, message: discord.Message):
             await message.channel.send(respuesta)
         return True
 
-    # Soporte en tickets (si no es comando ni verificación)
+    # Soporte dentro de tickets
     if is_ticket_channel and not contenido.startswith(PREFIX):
         if canal_id in tickets_con_staff:
             return False
@@ -142,8 +147,7 @@ async def on_message(bot, message: discord.Message):
                     {"role": "user", "content": message.content}
                 ]
                 respuesta = await obtener_respuesta_llama(prompt)
-                await message.reply(respuesta, mention_author=True)
+                await message.channel.send(respuesta)
             return True
-        return False
 
     return False
